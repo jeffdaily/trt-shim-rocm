@@ -9,7 +9,7 @@
 # Models are large, so they are downloaded to /tmp and not committed.
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-run="${here}/build/trt_run"
+run="${here}/build/trtshim_run"
 tmp=/tmp
 
 declare -A URL=(

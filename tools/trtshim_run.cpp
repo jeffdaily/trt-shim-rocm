@@ -7,7 +7,7 @@
 // exercise the fp16 path and the cross-process serialize round-trip on real
 // models.
 //
-// Usage: trt_run <model.onnx> <input.bin> <golden.txt>
+// Usage: trtshim_run <model.onnx> <input.bin> <golden.txt>
 //                [--fp16] [--save <engine>] [--load <engine>]
 // With --load, the model argument is ignored for building; the engine is read
 // from disk. Exit 0 iff argmax matches the golden.

@@ -12,9 +12,12 @@ over MIGraphX and ships `libtrtshim.so`, installed under the `libnvinfer.so` /
 
 ## Status
 
-Early bring-up. Phase 0 (backend de-risk) is complete: MIGraphX parses, compiles,
-and runs an ONNX model on a real AMD GPU (gfx90a, ROCm 7.2.1), matching the ONNX
-reference output. The TensorRT API surface itself is the next phase.
+Early bring-up. The shim mechanism works end to end: a driver that uses the
+stock TensorRT API sequence (build a serialized engine from ONNX, deserialize,
+bind buffers, run) produces correct results on a real AMD GPU (gfx90a, ROCm
+7.2.1), linking the shim through the `libnvinfer.so` / `libnvonnxparser.so`
+aliases. Next: run the stock TensorRT `sampleOnnxMNIST` unmodified, then
+`trtexec`, fp16/int8, and the ONNX backend conformance test.
 
 The build is validated only on AMD GPUs where MIGraphX is available: Linux gfx90a
 (primary) and gfx1100. Windows is not yet supported because MIGraphX has no

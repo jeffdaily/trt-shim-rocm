@@ -4,3 +4,5 @@ build/
 *.so.*
 __pycache__/
 *.pyc
+# apiv stub overrides are generated from the vendored headers at build time.
+src/generated/

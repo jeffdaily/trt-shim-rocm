@@ -97,6 +97,18 @@ target_link_libraries(sampleOnnxMNIST PRIVATE
   hip::host)
 set_target_properties(sampleOnnxMNIST PROPERTIES BUILD_RPATH ${CMAKE_BINARY_DIR})
 
+# Flexible driver for fp16 + serialize round-trip validation on real models.
+add_executable(trt_run tools/trt_run.cpp)
+add_dependencies(trt_run aliases)
+target_include_directories(trt_run PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tensorrt-headers/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/compat)
+target_link_libraries(trt_run PRIVATE
+  ${CMAKE_BINARY_DIR}/libnvinfer.so
+  ${CMAKE_BINARY_DIR}/libnvonnxparser.so
+  hip::host)
+set_target_properties(trt_run PROPERTIES BUILD_RPATH ${CMAKE_BINARY_DIR})
+
 enable_testing()
 add_test(NAME migraphx_smoke COMMAND migraphx_smoke
   ${CMAKE_CURRENT_SOURCE_DIR}/test/models/mnist_cnn.onnx
@@ -110,3 +122,15 @@ add_test(NAME sampleOnnxMNIST
   COMMAND sampleOnnxMNIST -d ${CMAKE_CURRENT_SOURCE_DIR}/test/mnist)
 set_tests_properties(sampleOnnxMNIST PROPERTIES
   PASS_REGULAR_EXPRESSION "PASSED TensorRT.sample_onnx_mnist")
+
+set(MODEL ${CMAKE_CURRENT_SOURCE_DIR}/test/models/mnist_cnn.onnx)
+set(INPUT ${CMAKE_CURRENT_SOURCE_DIR}/test/golden/input.bin)
+set(GOLD ${CMAKE_CURRENT_SOURCE_DIR}/test/golden/golden.txt)
+add_test(NAME trt_run_fp16 COMMAND trt_run ${MODEL} ${INPUT} ${GOLD} --fp16)
+# Cross-process serialize round-trip: save in one run, load in the next.
+add_test(NAME trt_run_save
+  COMMAND trt_run ${MODEL} ${INPUT} ${GOLD} --save ${CMAKE_BINARY_DIR}/rt.engine)
+add_test(NAME trt_run_load
+  COMMAND trt_run ${MODEL} ${INPUT} ${GOLD} --load ${CMAKE_BINARY_DIR}/rt.engine)
+set_tests_properties(trt_run_save PROPERTIES FIXTURES_SETUP RTENGINE)
+set_tests_properties(trt_run_load PROPERTIES FIXTURES_REQUIRED RTENGINE)

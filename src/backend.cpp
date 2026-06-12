@@ -264,7 +264,9 @@ IOInfo introspect(const void* onnx, size_t n) {
     // Parameter and output shapes are only reliable after compilation, so
     // compile for the GPU target here as well. The network token needs this to
     // answer getInput/getOutput dimensions before buildSerializedNetwork runs.
-    auto prog = migraphx::parse_onnx_buffer(onnx, n);
+    migraphx::onnx_options oopts;
+    oopts.set_default_dim_value(1);  // pin free dims (e.g. dynamic batch) to 1
+    auto prog = migraphx::parse_onnx_buffer(onnx, n, oopts);
     migraphx::target gpu("gpu");
     migraphx::compile_options copts;
     copts.set_offload_copy(true);
@@ -276,7 +278,9 @@ IOInfo introspect(const void* onnx, size_t n) {
 }
 
 std::string build(const void* onnx, size_t n, const BuildOptions& opts) {
-    auto prog = migraphx::parse_onnx_buffer(onnx, n);
+    migraphx::onnx_options oopts;
+    oopts.set_default_dim_value(1);  // pin free dims (e.g. dynamic batch) to 1
+    auto prog = migraphx::parse_onnx_buffer(onnx, n, oopts);
     apply_quantization(prog, opts);
 
     auto outs = collect_outputs(prog, onnx_output_names(onnx, n));

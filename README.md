@@ -33,16 +33,16 @@ What works today, validated on real GPU:
 |---|---|
 | ONNX model -> build engine -> infer | stock `sampleOnnxMNIST`; `trtshim_run` |
 | Link-level drop-in (`-lnvinfer`) | `sampleOnnxMNIST` links the alias, `ldd` resolves to libtrtshim |
+| Stock `trtexec` (dlopen drop-in) | unmodified NVIDIA `trtexec --onnx/--fp16/--int8/--save+loadEngine` runs and reports metrics on AMD |
 | fp16 | `trtshim_run --fp16` on ResNet-50 (matches onnxruntime) |
 | int8 (calibration) | `trtshim_run --int8`; IInt8Calibrator -> migraphx::quantize_int8 |
 | Engine serialize/deserialize (cross-process) | `trtshim_run --save/--load`; rejects NVIDIA `.engine` |
 | Single-axis dynamic shapes (dynamic batch) | `trtshim_dyn_run`: one engine at batch 1 and 2 |
 | Operator breadth | 96 operators fully green on the ONNX backend test (see `test/onnx_scoreboard.md`); 4 CNN families (ResNet/SqueezeNet/MobileNet/GoogLeNet) match onnxruntime |
 
-Deferred / not done (see [Roadmap](#roadmap)): `trtexec`, the int8 calibration
-*cache*, custom plugins, control-flow ops, and multi-axis dynamic shapes. Hard
-non-goals: deserializing NVIDIA-built `.engine` blobs, running CUDA plugin
-binaries, DLA.
+Deferred / not done (see [Roadmap](#roadmap)): the int8 calibration *cache*,
+custom plugins, control-flow ops, and multi-axis dynamic shapes. Hard non-goals:
+deserializing NVIDIA-built `.engine` blobs, running CUDA plugin binaries, DLA.
 
 ## Quick start
 
@@ -72,6 +72,19 @@ builds, runs ctest).
 way (see its target in `CMakeLists.txt`).
 
 ## Tools
+
+**`trtexec`** -- the stock NVIDIA TensorRT CLI, vendored unmodified and built
+against the shim. It dlopens `libnvinfer.so.10` at runtime (the build installs
+that alias), so it is a true drop-in. Run it like the real thing; it needs the
+build dir on the library path:
+
+```
+LD_LIBRARY_PATH=build ./build/trtexec --onnx=test/mnist/mnist.onnx --fp16
+```
+
+Validated with `--onnx`, `--fp16`, `--int8`, `--saveEngine`, and `--loadEngine`;
+it prints normal throughput/latency metrics. (Build with `-DBUILD_TRTEXEC=OFF`
+to skip it.)
 
 Bespoke drivers (the `trtshim_` prefix marks them as this project's, not NVIDIA
 tools). All take ONNX models and run them through the shim on the GPU.
@@ -120,7 +133,7 @@ for the full internals (and how to extend the shim).
 
 ```
 third_party/tensorrt-headers/  vendored NVIDIA TRT 10.7 + onnx-tensorrt headers
-include/compat/                CUDA-runtime -> HIP compat headers (Strategy A)
+include/compat/                CUDA-runtime -> HIP shadow headers
 src/
   shim.cpp                     nvinfer1/nvonnxparser implementations + factories
   backend.{h,cpp}              the only MIGraphX/HIP code; ONNX->compile->run
@@ -143,18 +156,23 @@ docs/                          ARCHITECTURE.md, migraphx-findings.md, reproducer
 
 ## Roadmap
 
-Deferred work, in rough priority order (details in
-[docs/migraphx-findings.md](docs/migraphx-findings.md) and the MOAT
-`data/deferred.py` registry):
+Deferred work, in rough priority order (background and reproducers in
+[docs/migraphx-findings.md](docs/migraphx-findings.md)):
 
-- **trtexec** -- the standard TensorRT CLI. Needs the full TensorRT sample
-  inference framework and a much larger CUDA device/graph compat surface.
-- **int8 calibration cache** -- blocked on MIGraphX exposing computed int8
-  scales (a feature request filed in the findings).
+- **int8 calibration cache** -- the int8 *math* works; persisting/reusing the
+  calibration scales (`read/writeCalibrationCache`) is blocked on MIGraphX
+  exposing the computed scales (a feature request filed in the findings).
 - **Dynamic batch on concat-heavy models** -- blocked on a MIGraphX dynamic-shape
   codegen bug (reproducer in `docs/`).
-- Plugins (IPluginV3), control-flow ops, multi-axis dynamic shapes -- MIGraphX
-  gaps better closed upstream than worked around.
+- **Plugins (IPluginV3)** -- MIGraphX has a custom-op path (`migraphx::module` +
+  a registered kernel), so it is tractable but unbuilt; the shim ships a no-op
+  plugin lib so plugin-free consumers run.
+- **Layer-builder API** (`INetworkDefinition::addConvolution`, ...) -- only
+  needed by apps that build networks in code instead of from ONNX. Each layer
+  maps to a `migraphx::operation`, so it is tractable but large; left until a
+  consumer needs it.
+- **Control-flow ops, multi-axis dynamic shapes** -- MIGraphX gaps better closed
+  upstream than worked around.
 
 ## Known MIGraphX gaps found here
 

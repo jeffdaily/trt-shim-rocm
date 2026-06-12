@@ -158,9 +158,28 @@ the runtime calls the samples execute (malloc/memcpy/streams/events/device
 queries) to HIP; CUDA-graph capture symbols, used only by helper code the simple
 samples never call, are stubbed with CUDA-shaped signatures. On an NVIDIA build
 this directory is absent and the real CUDA headers are used, so nothing here
-perturbs CUDA. This is the MOAT "Strategy A" compat-header pattern. Extending to
-`trtexec` means growing this surface considerably (device properties, managed/
-host alloc, real graph capture, profiler).
+perturbs CUDA. This is a shadow-header shim: the compat directory is placed
+ahead of the system include path so `<cuda_runtime_api.h>` resolves here on an
+AMD build, and is simply absent from the include path on an NVIDIA build.
+Building `trtexec` grew this surface considerably -- device properties
+(`cudaDeviceProp` aliased to `hipDeviceProp_t`), `cudaMemGetInfo`, managed/host
+alloc, `cudaLaunchHostFunc`, pointer attributes, stream-capture status, and the
+profiler stubs -- all in `include/compat/`.
+
+## trtexec
+
+The stock NVIDIA `trtexec` runs unmodified against the shim. Two things made it
+work beyond the compat surface: (1) `trtexec` dlopens `libnvinfer.so.10` /
+`libnvonnxparser.so.10` at runtime and `dlsym`s the factory symbols, so the
+build creates those versioned aliases (and a no-op `libnvinfer_plugin.so.10`
+that `trtexec` loads for the standard plugins); (2) it exercises more of the
+engine/context API than the sample -- `getNbOptimizationProfiles` (return 1),
+`setOptimizationProfileAsync`, `IExecutionContext::getEngine`/`getTensorShape`/
+`getTensorStrides`, the `*V2` tensor-format queries, and the
+`IStreamReader`/`IStreamReaderV2` deserialize overloads (drain the stream into
+the blob deserializer). `TRTSHIM_DEBUG=1` was how each next-needed method was
+found: run, see which stub it logs or which `trtshim_die` it hits, implement,
+repeat.
 
 ## Testing
 

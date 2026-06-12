@@ -12,8 +12,10 @@
 //     samples never call, are stubbed with CUDA-shaped signatures so they
 //     compile without depending on HIP graph-API signature details.
 //
-// This is the MOAT "Strategy A" pattern: on an NVIDIA build this directory is
-// absent and the genuine CUDA header is used, so nothing here perturbs CUDA.
+// This is a shadow-header shim: this directory is put ahead of the system
+// include path so `<cuda_runtime_api.h>` resolves here on an AMD build. On an
+// NVIDIA build this directory is simply not on the include path, so the genuine
+// CUDA header is used and nothing here perturbs CUDA.
 #ifndef TRT_SHIM_ROCM_COMPAT_CUDA_RUNTIME_API_H
 #define TRT_SHIM_ROCM_COMPAT_CUDA_RUNTIME_API_H
 
@@ -101,6 +103,62 @@ inline const char* cudaGetErrorName(cudaError_t e) {
     return hipGetErrorName(e);
 }
 inline cudaError_t cudaGetLastError() { return hipGetLastError(); }
+
+// ---- device / host / event surface (used by trtexec's framework) ----------
+using cudaDeviceProp = hipDeviceProp_t;
+using cudaUUID_t = hipUUID;
+using cudaHostFn_t = hipHostFn_t;
+constexpr unsigned int cudaEventBlockingSync = hipEventBlockingSync;
+constexpr unsigned int cudaEventDefault = hipEventDefault;
+constexpr unsigned int cudaDeviceScheduleSpin = hipDeviceScheduleSpin;
+constexpr cudaStreamCaptureMode cudaStreamCaptureModeThreadLocal =
+    hipStreamCaptureModeThreadLocal;
+
+inline cudaError_t cudaDriverGetVersion(int* v) { return hipDriverGetVersion(v); }
+inline cudaError_t cudaRuntimeGetVersion(int* v) { return hipRuntimeGetVersion(v); }
+inline cudaError_t cudaGetDeviceCount(int* c) { return hipGetDeviceCount(c); }
+inline cudaError_t cudaGetDeviceProperties(cudaDeviceProp* p, int d) {
+    return hipGetDeviceProperties(p, d);
+}
+inline cudaError_t cudaSetDevice(int d) { return hipSetDevice(d); }
+inline cudaError_t cudaSetDeviceFlags(unsigned f) { return hipSetDeviceFlags(f); }
+inline cudaError_t cudaEventCreateWithFlags(cudaEvent_t* e, unsigned f) {
+    return hipEventCreateWithFlags(e, f);
+}
+inline cudaError_t cudaStreamWaitEvent(cudaStream_t s, cudaEvent_t e, unsigned f) {
+    return hipStreamWaitEvent(s, e, f);
+}
+inline cudaError_t cudaStreamCreate(cudaStream_t* s) { return hipStreamCreate(s); }
+inline cudaError_t cudaMallocManaged(void** p, size_t n,
+                                     unsigned f = hipMemAttachGlobal) {
+    return hipMallocManaged(p, n, f);
+}
+inline cudaError_t cudaMallocHost(void** p, size_t n) { return hipHostMalloc(p, n, 0); }
+inline cudaError_t cudaFreeHost(void* p) { return hipHostFree(p); }
+inline cudaError_t cudaLaunchHostFunc(cudaStream_t s, cudaHostFn_t fn, void* u) {
+    return hipLaunchHostFunc(s, fn, u);
+}
+inline cudaError_t cudaMemGetInfo(size_t* free, size_t* total) {
+    return hipMemGetInfo(free, total);
+}
+
+// stream-capture status query and pointer attributes
+using cudaStreamCaptureStatus = hipStreamCaptureStatus;
+constexpr cudaStreamCaptureStatus cudaStreamCaptureStatusNone =
+    hipStreamCaptureStatusNone;
+inline cudaError_t cudaStreamIsCapturing(cudaStream_t s,
+                                         cudaStreamCaptureStatus* st) {
+    return hipStreamIsCapturing(s, st);
+}
+using cudaPointerAttributes = hipPointerAttribute_t;
+using cudaMemoryType = hipMemoryType;
+constexpr cudaMemoryType cudaMemoryTypeHost = hipMemoryTypeHost;
+constexpr cudaMemoryType cudaMemoryTypeDevice = hipMemoryTypeDevice;
+constexpr cudaMemoryType cudaMemoryTypeUnregistered = hipMemoryTypeUnregistered;
+inline cudaError_t cudaPointerGetAttributes(cudaPointerAttributes* a,
+                                            const void* p) {
+    return hipPointerGetAttributes(a, p);
+}
 
 // ---- CUDA graph capture: stubbed (compile-only for the simple samples) -----
 inline cudaError_t cudaStreamBeginCapture(cudaStream_t, cudaStreamCaptureMode) {

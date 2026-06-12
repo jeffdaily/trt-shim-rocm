@@ -41,8 +41,10 @@ target_include_directories(trtshim PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(trtshim PRIVATE migraphx::c hip::host)
 
-# Link-compatibility aliases: libnvinfer.so / libnvonnxparser.so -> libtrtshim.so
-set(ALIASES libnvinfer.so libnvonnxparser.so)
+# Link-compatibility aliases -> libtrtshim.so. The unversioned names are for
+# link-time (-lnvinfer); the versioned .so.10 names are what runtime dlopen
+# consumers (trtexec) look up (libnvinfer.so.<NV_TENSORRT_MAJOR>).
+set(ALIASES libnvinfer.so libnvonnxparser.so libnvinfer.so.10 libnvonnxparser.so.10)
 set(ALIAS_FILES "")
 foreach(a ${ALIASES})
   add_custom_command(
@@ -54,6 +56,18 @@ foreach(a ${ALIASES})
   list(APPEND ALIAS_FILES ${CMAKE_BINARY_DIR}/${a})
 endforeach()
 add_custom_target(aliases ALL DEPENDS ${ALIAS_FILES})
+
+# Stub libnvinfer_plugin: consumers dlopen libnvinfer_plugin.so.10 to register
+# the standard NVIDIA plugins. The shim ships no plugins, so this is a no-op so
+# such consumers (trtexec) load; plugin-using models fail later with a clear
+# unsupported-operator error.
+add_library(nvinfer_plugin SHARED src/plugin_stub.cpp)
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/libnvinfer_plugin.so.10
+  COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE_NAME:nvinfer_plugin>
+          ${CMAKE_BINARY_DIR}/libnvinfer_plugin.so.10
+  DEPENDS nvinfer_plugin)
+add_custom_target(plugin_alias ALL DEPENDS ${CMAKE_BINARY_DIR}/libnvinfer_plugin.so.10)
 
 # Phase 0: MIGraphX-only backend smoke (no shim).
 add_executable(migraphx_smoke tools/migraphx_smoke.cpp)
@@ -111,6 +125,36 @@ foreach(drv trtshim_run trtshim_dyn_run trtshim_infer)
   set_target_properties(${drv} PROPERTIES BUILD_RPATH ${CMAKE_BINARY_DIR})
 endforeach()
 
+# The stock TensorRT trtexec CLI, vendored unmodified, built against the shim.
+# Needs the full sample inference framework and a larger CUDA->HIP compat
+# surface (include/compat).
+option(BUILD_TRTEXEC "Build the vendored trtexec against the shim" ON)
+if(BUILD_TRTEXEC)
+  add_executable(trtexec
+    ${SAMPLES}/trtexec/trtexec.cpp
+    ${SAMPLES}/common/logger.cpp
+    ${SAMPLES}/common/sampleDevice.cpp
+    ${SAMPLES}/common/sampleEngines.cpp
+    ${SAMPLES}/common/sampleInference.cpp
+    ${SAMPLES}/common/sampleOptions.cpp
+    ${SAMPLES}/common/sampleReporting.cpp
+    ${SAMPLES}/common/sampleUtils.cpp
+    ${SAMPLES}/common/getOptions.cpp
+    ${SAMPLES}/common/bfloat16.cpp
+    ${SAMPLES}/utils/timingCache.cpp
+    ${SAMPLES}/utils/fileLock.cpp)
+  add_dependencies(trtexec aliases)
+  target_include_directories(trtexec PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tensorrt-headers/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/compat
+    ${SAMPLES} ${SAMPLES}/common ${SAMPLES}/utils ${SAMPLES}/trtexec)
+  target_link_libraries(trtexec PRIVATE
+    ${CMAKE_BINARY_DIR}/libnvinfer.so
+    ${CMAKE_BINARY_DIR}/libnvonnxparser.so
+    hip::host)
+  set_target_properties(trtexec PROPERTIES BUILD_RPATH ${CMAKE_BINARY_DIR})
+endif()
+
 enable_testing()
 add_test(NAME migraphx_smoke COMMAND migraphx_smoke
   ${CMAKE_CURRENT_SOURCE_DIR}/test/models/mnist_cnn.onnx
@@ -141,3 +185,11 @@ add_test(NAME trtshim_dyn_run COMMAND trtshim_dyn_run
   ${CMAKE_CURRENT_SOURCE_DIR}/test/models/dyn_cnn.onnx
   ${CMAKE_CURRENT_SOURCE_DIR}/test/golden/dyn_input2.bin
   ${CMAKE_CURRENT_SOURCE_DIR}/test/golden/dyn_golden.txt)
+if(BUILD_TRTEXEC)
+  # The stock trtexec dlopens libnvinfer.so.10 from the build dir at runtime.
+  add_test(NAME trtexec
+    COMMAND trtexec --onnx=${CMAKE_CURRENT_SOURCE_DIR}/test/mnist/mnist.onnx)
+  set_tests_properties(trtexec PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+    PASS_REGULAR_EXPRESSION "PASSED TensorRT.trtexec")
+endif()

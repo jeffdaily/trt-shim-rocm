@@ -255,11 +255,33 @@ private:
 class ShimContext : public nvinfer1::IExecutionContext,
                     public nvinfer1::apiv::VExecutionContext {
 public:
-    ShimContext(Engine* engine, const std::vector<IOTensor>* ios)
-        : engine_(engine), ios_(ios) {
+    ShimContext(Engine* engine, const std::vector<IOTensor>* ios,
+                nvinfer1::ICudaEngine* owner)
+        : engine_(engine), ios_(ios), owner_(owner) {
         mImpl = this;
     }
     nvinfer1::IExecutionContext* getPImpl() noexcept override { return this; }
+    nvinfer1::ICudaEngine const& getEngine() const noexcept override {
+        return *owner_;
+    }
+    nvinfer1::Dims getTensorShape(char const* name) const noexcept override {
+        auto it = shapes_.find(name);
+        if (it != shapes_.end()) return to_dims(it->second);
+        for (const auto& io : *ios_)
+            if (io.name == name) return to_dims(io.dims);
+        return nvinfer1::Dims{};
+    }
+    nvinfer1::Dims getTensorStrides(char const* name) const noexcept override {
+        auto dims = getTensorShape(name);
+        nvinfer1::Dims s{};
+        s.nbDims = dims.nbDims;
+        int64_t acc = 1;
+        for (int i = dims.nbDims - 1; i >= 0; --i) {
+            s.d[i] = acc;
+            acc *= dims.d[i] > 0 ? dims.d[i] : 1;
+        }
+        return s;
+    }
 
     bool setTensorAddress(char const* name, void* data) noexcept override {
         addrs_[name] = data;
@@ -279,11 +301,16 @@ public:
     bool enqueueV3(cudaStream_t stream) noexcept override {
         return engine_->run(addrs_, shapes_, static_cast<void*>(stream));
     }
+    bool setOptimizationProfileAsync(int32_t profile,
+                                     cudaStream_t) noexcept override {
+        return profile == 0;  // the shim exposes a single profile
+    }
 #include "generated/VExecutionContext.stubs.inc"
 
 private:
     Engine* engine_;
     const std::vector<IOTensor>* ios_;
+    nvinfer1::ICudaEngine* owner_;
     std::map<std::string, void*> addrs_;
     std::map<std::string, std::vector<int64_t>> shapes_;
 };
@@ -329,19 +356,26 @@ public:
         const IOTensor* t = find(name);
         return t ? static_cast<int32_t>(t->bytes_per_elem) : 0;
     }
+    int32_t getTensorComponentsPerElementV2(char const*, int32_t) const noexcept override {
+        return 1;
+    }
+    int32_t getTensorVectorizedDimV2(char const*, int32_t) const noexcept override {
+        return -1;
+    }
     nvinfer1::IExecutionContext* createExecutionContext(
         nvinfer1::ExecutionContextAllocationStrategy) noexcept override {
-        return new ShimContext(engine_.get(), &ios());
+        return new ShimContext(engine_.get(), &ios(), this);
     }
     nvinfer1::IExecutionContext* createExecutionContextWithoutDeviceMemory()
         noexcept override {
-        return new ShimContext(engine_.get(), &ios());
+        return new ShimContext(engine_.get(), &ios(), this);
     }
     nvinfer1::IHostMemory* serialize() const noexcept override {
         return new ShimHostMemory(blob_);
     }
     char const* getName() const noexcept override { return "trtshim_engine"; }
     int32_t getNbLayers() const noexcept override { return 1; }
+    int32_t getNbOptimizationProfiles() const noexcept override { return 1; }
 #include "generated/VCudaEngine.stubs.inc"
 
 private:
@@ -378,8 +412,22 @@ public:
                               std::string(static_cast<const char*>(blob), size));
     }
     nvinfer1::ICudaEngine* deserializeCudaEngine(
-        nvinfer1::IStreamReader&) noexcept override {
-        return nullptr;  // stream-reader deserialize not supported in this phase
+        nvinfer1::IStreamReader& reader) noexcept override {
+        std::string buf;
+        char tmp[1 << 16];
+        for (int64_t n; (n = reader.read(tmp, sizeof(tmp))) > 0;) {
+            buf.append(tmp, static_cast<size_t>(n));
+        }
+        return deserializeCudaEngine(buf.data(), buf.size());
+    }
+    nvinfer1::ICudaEngine* deserializeCudaEngineV2(
+        nvinfer1::IStreamReaderV2& reader) noexcept override {
+        std::string buf;
+        char tmp[1 << 16];
+        for (int64_t n; (n = reader.read(tmp, sizeof(tmp), 0)) > 0;) {
+            buf.append(tmp, static_cast<size_t>(n));
+        }
+        return deserializeCudaEngine(buf.data(), buf.size());
     }
 #include "generated/VRuntime.stubs.inc"
 

@@ -277,10 +277,38 @@ IOInfo introspect(const void* onnx, size_t n) {
     return info;
 }
 
-std::string build(const void* onnx, size_t n, const BuildOptions& opts) {
+std::string build(const void* onnx, size_t n, const BuildOptions& opts,
+                  CalibrationSource* calib) {
     migraphx::onnx_options oopts;
     oopts.set_default_dim_value(1);  // pin free dims (e.g. dynamic batch) to 1
     auto prog = migraphx::parse_onnx_buffer(onnx, n, oopts);
+
+    // int8 quantization runs on the uncompiled program: drive calibration
+    // batches from the source into migraphx::quantize_int8 before compiling.
+    if (opts.int8 && calib) {
+        auto inputs = collect_inputs(prog);
+        migraphx::target gpu_t("gpu");
+        migraphx::quantize_int8_options qopts;
+        std::vector<std::unique_ptr<CalibrationData>> kept;
+        std::vector<migraphx::program_parameters> kept_pp;
+        while (true) {
+            auto cd = std::make_unique<CalibrationData>();
+            if (!calib->next(inputs, *cd)) break;
+            migraphx::program_parameters pp;
+            for (const auto& in : inputs) {
+                auto it = cd->tensors.find(in.name);
+                if (it == cd->tensors.end()) continue;
+                migraphx::shape s(
+                    static_cast<migraphx_shape_datatype_t>(in.datatype),
+                    std::vector<size_t>(in.dims.begin(), in.dims.end()));
+                pp.add(in.name.c_str(), migraphx::argument(s, it->second.data()));
+            }
+            qopts.add_calibration_data(pp);
+            kept_pp.push_back(std::move(pp));  // keep handles alive for quantize
+            kept.push_back(std::move(cd));     // keep host data alive
+        }
+        if (!kept.empty()) migraphx::quantize_int8(prog, gpu_t, qopts);
+    }
     apply_quantization(prog, opts);
 
     auto outs = collect_outputs(prog, onnx_output_names(onnx, n));

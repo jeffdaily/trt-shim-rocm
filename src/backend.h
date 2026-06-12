@@ -37,6 +37,23 @@ struct BuildOptions {
     bool bf16 = false;
 };
 
+// One int8 calibration batch: host data per input, sized to that input's byte
+// size. Supplied by the shim's IInt8Calibrator wrapper.
+struct CalibrationData {
+    std::map<std::string, std::vector<char>> tensors;
+};
+
+// Abstract calibration data source, implemented by the shim over
+// nvinfer1::IInt8Calibrator. Keeps backend.* free of TensorRT types.
+class CalibrationSource {
+public:
+    virtual ~CalibrationSource() = default;
+    // Fill `batch` with the next calibration batch (host data per input).
+    // Return false when the calibrator is exhausted.
+    virtual bool next(const std::vector<IOTensor>& inputs,
+                      CalibrationData& batch) = 0;
+};
+
 // A compiled engine: the MIGraphX program plus its IO description.
 class Engine {
 public:
@@ -61,9 +78,11 @@ struct IOInfo {
 IOInfo introspect(const void* onnx, size_t n);
 
 // Build: parse ONNX, apply flags, compile for the GPU, and return a serialized
-// engine blob (magic header + IO metadata + MIGraphX program). Throws
-// std::runtime_error on failure.
-std::string build(const void* onnx, size_t n, const BuildOptions& opts);
+// engine blob (magic header + IO metadata + MIGraphX program). When opts.int8
+// is set and calib is non-null, calibration batches drive migraphx int8
+// quantization. Throws std::runtime_error on failure.
+std::string build(const void* onnx, size_t n, const BuildOptions& opts,
+                  CalibrationSource* calib = nullptr);
 
 // Load a serialized engine blob produced by build(). Returns nullptr and sets
 // err if the blob is not ours (e.g. an NVIDIA .engine).

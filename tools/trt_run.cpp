@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,34 @@ int64_t volume(const nvinfer1::Dims& d) {
     return v;
 }
 
+// Minimal entropy calibrator that feeds a fixed input batch a few times. Enough
+// to exercise the int8 calibration -> migraphx::quantize_int8 bridge.
+class FixedCalibrator : public nvinfer1::IInt8EntropyCalibrator2 {
+public:
+    FixedCalibrator(const std::string& raw, int batches)
+        : batches_(batches), bytes_(raw.size()) {
+        hipMalloc(&device_, bytes_);
+        hipMemcpy(device_, raw.data(), bytes_, hipMemcpyHostToDevice);
+    }
+    ~FixedCalibrator() override { hipFree(device_); }
+    int32_t getBatchSize() const noexcept override { return 1; }
+    bool getBatch(void* bindings[], char const*[], int32_t n) noexcept override {
+        if (batches_-- <= 0) return false;
+        for (int32_t i = 0; i < n; ++i) bindings[i] = device_;
+        return true;
+    }
+    void const* readCalibrationCache(std::size_t& length) noexcept override {
+        length = 0;
+        return nullptr;
+    }
+    void writeCalibrationCache(void const*, std::size_t) noexcept override {}
+
+private:
+    int batches_;
+    size_t bytes_;
+    void* device_ = nullptr;
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -59,18 +88,21 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string model = argv[1], input = argv[2], golden = argv[3];
-    bool fp16 = false;
+    bool fp16 = false, int8 = false;
     std::string save_path, load_path;
     for (int i = 4; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--fp16") fp16 = true;
+        else if (a == "--int8") int8 = true;
         else if (a == "--save" && i + 1 < argc) save_path = argv[++i];
         else if (a == "--load" && i + 1 < argc) load_path = argv[++i];
     }
 
     Logger logger;
+    const std::string input_raw = read_file(input);
     auto runtime = nvinfer1::createInferRuntime(logger);
     nvinfer1::ICudaEngine* engine = nullptr;
+    std::unique_ptr<FixedCalibrator> calibrator;
 
     if (!load_path.empty()) {
         const std::string blob = read_file(load_path);
@@ -80,6 +112,11 @@ int main(int argc, char** argv) {
         auto network = builder->createNetworkV2(0);
         auto config = builder->createBuilderConfig();
         if (fp16) config->setFlag(nvinfer1::BuilderFlag::kFP16);
+        if (int8) {
+            config->setFlag(nvinfer1::BuilderFlag::kINT8);
+            calibrator = std::make_unique<FixedCalibrator>(input_raw, 4);
+            config->setInt8Calibrator(calibrator.get());
+        }
         auto parser = nvonnxparser::createParser(*network, logger);
         if (!parser->parseFromFile(model.c_str(), 0)) {
             std::fprintf(stderr, "parse failed\n");
@@ -104,7 +141,6 @@ int main(int argc, char** argv) {
     }
 
     auto context = engine->createExecutionContext();
-    const std::string input_raw = read_file(input);
 
     const int32_t nio = engine->getNbIOTensors();
     std::vector<void*> device(nio, nullptr);
@@ -140,7 +176,8 @@ int main(int argc, char** argv) {
         static_cast<int>(std::max_element(out.begin(), out.end()) - out.begin());
     int want = -1;
     std::ifstream(golden) >> want;
-    std::printf("argmax=%d golden=%d%s%s\n", argmax, want, fp16 ? " [fp16]" : "",
+    std::printf("argmax=%d golden=%d%s%s%s\n", argmax, want,
+                fp16 ? " [fp16]" : "", int8 ? " [int8]" : "",
                 load_path.empty() ? "" : " [loaded]");
     if (argmax != want) {
         std::printf("FAILED\n");

@@ -127,6 +127,7 @@ set(MODEL ${CMAKE_CURRENT_SOURCE_DIR}/test/models/mnist_cnn.onnx)
 set(INPUT ${CMAKE_CURRENT_SOURCE_DIR}/test/golden/input.bin)
 set(GOLD ${CMAKE_CURRENT_SOURCE_DIR}/test/golden/golden.txt)
 add_test(NAME trt_run_fp16 COMMAND trt_run ${MODEL} ${INPUT} ${GOLD} --fp16)
+add_test(NAME trt_run_int8 COMMAND trt_run ${MODEL} ${INPUT} ${GOLD} --int8)
 # Cross-process serialize round-trip: save in one run, load in the next.
 add_test(NAME trt_run_save
   COMMAND trt_run ${MODEL} ${INPUT} ${GOLD} --save ${CMAKE_BINARY_DIR}/rt.engine)

@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+#include <hip/hip_runtime_api.h>
+
 #include "NvInfer.h"
 #include "NvOnnxParser.h"
 #include "backend.h"
@@ -178,10 +180,30 @@ public:
         o.bf16 = getFlag(nvinfer1::BuilderFlag::kBF16);
         return o;
     }
+    void setInt8Calibrator(nvinfer1::IInt8Calibrator* c) noexcept override {
+        calibrator_ = c;
+    }
+    nvinfer1::IInt8Calibrator* getInt8Calibrator() const noexcept override {
+        return calibrator_;
+    }
+    int32_t addOptimizationProfile(
+        nvinfer1::IOptimizationProfile const* p) noexcept override {
+        profiles_.push_back(p);
+        return static_cast<int32_t>(profiles_.size()) - 1;
+    }
+    int32_t getNbOptimizationProfiles() const noexcept override {
+        return static_cast<int32_t>(profiles_.size());
+    }
+    nvinfer1::IInt8Calibrator* calibrator() const { return calibrator_; }
+    nvinfer1::IOptimizationProfile const* profile() const {
+        return profiles_.empty() ? nullptr : profiles_.front();
+    }
 #include "generated/VBuilderConfig.stubs.inc"
 
 private:
     uint32_t flags_ = 0;
+    nvinfer1::IInt8Calibrator* calibrator_ = nullptr;
+    std::vector<nvinfer1::IOptimizationProfile const*> profiles_;
 };
 
 // ---- IExecutionContext ---------------------------------------------------
@@ -318,6 +340,34 @@ private:
 };
 
 // ---- IBuilder ------------------------------------------------------------
+// Bridges nvinfer1::IInt8Calibrator to the backend CalibrationSource: pulls a
+// batch via getBatch (which fills device pointers) and stages it to host.
+class ShimCalibSource : public CalibrationSource {
+public:
+    explicit ShimCalibSource(nvinfer1::IInt8Calibrator* cal) : cal_(cal) {}
+    bool next(const std::vector<IOTensor>& inputs,
+              CalibrationData& batch) override {
+        const int32_t n = static_cast<int32_t>(inputs.size());
+        std::vector<char const*> names(n);
+        for (int32_t i = 0; i < n; ++i) names[i] = inputs[i].name.c_str();
+        std::vector<void*> bindings(n, nullptr);
+        if (!cal_->getBatch(bindings.data(), names.data(), n)) return false;
+        for (int32_t i = 0; i < n; ++i) {
+            size_t bytes = inputs[i].bytes_per_elem;
+            for (int64_t d : inputs[i].dims) bytes *= static_cast<size_t>(d);
+            std::vector<char> host(bytes);
+            if (bindings[i]) {
+                hipMemcpy(host.data(), bindings[i], bytes, hipMemcpyDeviceToHost);
+            }
+            batch.tensors[inputs[i].name] = std::move(host);
+        }
+        return true;
+    }
+
+private:
+    nvinfer1::IInt8Calibrator* cal_;
+};
+
 class ShimBuilder : public nvinfer1::IBuilder, public nvinfer1::apiv::VBuilder {
 public:
     explicit ShimBuilder(nvinfer1::ILogger* logger) : logger_(logger) {
@@ -338,8 +388,13 @@ public:
         auto& net = static_cast<ShimNetwork&>(network);
         auto& cfg = static_cast<ShimConfig&>(config);
         try {
-            std::string blob = build(net.onnx().data(), net.onnx().size(),
-                                     cfg.options());
+            auto opts = cfg.options();
+            std::unique_ptr<CalibrationSource> calib;
+            if (opts.int8 && cfg.calibrator()) {
+                calib = std::make_unique<ShimCalibSource>(cfg.calibrator());
+            }
+            std::string blob = build(net.onnx().data(), net.onnx().size(), opts,
+                                     calib.get());
             return new ShimHostMemory(std::move(blob));
         } catch (const std::exception& e) {
             if (logger_) {

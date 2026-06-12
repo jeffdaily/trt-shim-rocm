@@ -98,7 +98,7 @@ target_link_libraries(sampleOnnxMNIST PRIVATE
 set_target_properties(sampleOnnxMNIST PROPERTIES BUILD_RPATH ${CMAKE_BINARY_DIR})
 
 # Flexible driver for fp16 + serialize round-trip validation on real models.
-foreach(drv trt_run dyn_run)
+foreach(drv trt_run dyn_run trt_infer)
   add_executable(${drv} tools/${drv}.cpp)
   add_dependencies(${drv} aliases)
   target_include_directories(${drv} PRIVATE

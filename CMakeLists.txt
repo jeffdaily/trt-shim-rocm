@@ -73,6 +73,30 @@ target_link_libraries(driver_smoke PRIVATE
 set_target_properties(driver_smoke PROPERTIES
   BUILD_RPATH ${CMAKE_BINARY_DIR})
 
+# Milestone 1b: the STOCK TensorRT sampleOnnxMNIST, vendored unmodified, built
+# against the shim. Proves an unmodified TensorRT consumer (its common/ helpers
+# call the CUDA runtime, resolved to HIP by include/compat) builds and runs on
+# AMD.
+set(SAMPLES ${CMAKE_CURRENT_SOURCE_DIR}/vendor/tensorrt-samples)
+add_executable(sampleOnnxMNIST
+  ${SAMPLES}/sampleOnnxMNIST/sampleOnnxMNIST.cpp
+  ${SAMPLES}/common/logger.cpp
+  ${SAMPLES}/utils/timingCache.cpp
+  ${SAMPLES}/utils/fileLock.cpp)
+add_dependencies(sampleOnnxMNIST aliases)
+target_include_directories(sampleOnnxMNIST PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tensorrt-headers/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/compat
+  ${SAMPLES}
+  ${SAMPLES}/common
+  ${SAMPLES}/utils
+  ${SAMPLES}/sampleOnnxMNIST)
+target_link_libraries(sampleOnnxMNIST PRIVATE
+  ${CMAKE_BINARY_DIR}/libnvinfer.so
+  ${CMAKE_BINARY_DIR}/libnvonnxparser.so
+  hip::host)
+set_target_properties(sampleOnnxMNIST PROPERTIES BUILD_RPATH ${CMAKE_BINARY_DIR})
+
 enable_testing()
 add_test(NAME migraphx_smoke COMMAND migraphx_smoke
   ${CMAKE_CURRENT_SOURCE_DIR}/test/models/mnist_cnn.onnx
@@ -82,3 +106,7 @@ add_test(NAME driver_smoke COMMAND driver_smoke
   ${CMAKE_CURRENT_SOURCE_DIR}/test/models/mnist_cnn.onnx
   ${CMAKE_CURRENT_SOURCE_DIR}/test/golden/input.bin
   ${CMAKE_CURRENT_SOURCE_DIR}/test/golden/golden.txt)
+add_test(NAME sampleOnnxMNIST
+  COMMAND sampleOnnxMNIST -d ${CMAKE_CURRENT_SOURCE_DIR}/test/mnist)
+set_tests_properties(sampleOnnxMNIST PROPERTIES
+  PASS_REGULAR_EXPRESSION "PASSED TensorRT.sample_onnx_mnist")

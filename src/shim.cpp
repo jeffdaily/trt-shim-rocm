@@ -339,7 +339,7 @@ public:
         auto& cfg = static_cast<ShimConfig&>(config);
         try {
             std::string blob = build(net.onnx().data(), net.onnx().size(),
-                                     cfg.options(), /*output_names=*/{});
+                                     cfg.options());
             return new ShimHostMemory(std::move(blob));
         } catch (const std::exception& e) {
             if (logger_) {
@@ -420,7 +420,7 @@ private:
     bool ingest(const char* data, size_t size) {
         try {
             network_->capture(std::string(data, size));
-            network_->populate(introspect(data, size, /*output_names=*/{}));
+            network_->populate(introspect(data, size));
             return true;
         } catch (const std::exception& e) {
             if (logger_) {
@@ -445,6 +445,13 @@ void* createInferBuilder_INTERNAL(void* logger, int /*version*/) noexcept {
 
 void* createInferRuntime_INTERNAL(void* logger, int /*version*/) noexcept {
     return new nvinfer1::shim::ShimRuntime(static_cast<nvinfer1::ILogger*>(logger));
+}
+
+// Refit is not supported; provide the symbol so consumers that define a
+// createRefitter entrypoint link, and return null at runtime.
+void* createInferRefitter_INTERNAL(void* /*engine*/, void* /*logger*/,
+                                   int /*version*/) noexcept {
+    return nullptr;
 }
 
 void* createNvOnnxParser_INTERNAL(void* network, void* logger,

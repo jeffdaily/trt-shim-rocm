@@ -2,11 +2,14 @@
 // Author: Jeff Daily <jeff.daily@amd.com>
 #include "backend.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <unistd.h>
+#include <utility>
 
 #include <hip/hip_runtime_api.h>
 #include <migraphx/migraphx.hpp>
@@ -15,6 +18,93 @@ namespace trtshim {
 namespace {
 
 constexpr char kMagic[8] = {'T', 'R', 'T', 'S', 'H', 'I', 'M', '\x01'};
+
+// Minimal protobuf reader to recover ONNX graph output names. MIGraphX does not
+// expose them (get_output_shapes is positional), but TensorRT consumers expect
+// the engine's IO tensor names to be the real ONNX names. We walk just enough
+// of the wire format: ModelProto.graph (field 7) -> GraphProto.output (field
+// 12, repeated ValueInfoProto) -> ValueInfoProto.name (field 1, string).
+class PbReader {
+public:
+    PbReader(const uint8_t* p, size_t n) : p_(p), end_(p + n) {}
+    bool eof() const { return p_ >= end_; }
+    uint64_t varint() {
+        uint64_t r = 0;
+        int shift = 0;
+        while (p_ < end_ && shift < 64) {
+            uint8_t b = *p_++;
+            r |= static_cast<uint64_t>(b & 0x7f) << shift;
+            if (!(b & 0x80)) break;
+            shift += 7;
+        }
+        return r;
+    }
+    bool tag(uint32_t& field, uint32_t& wire) {
+        if (eof()) return false;
+        uint64_t t = varint();
+        field = static_cast<uint32_t>(t >> 3);
+        wire = static_cast<uint32_t>(t & 7);
+        return true;
+    }
+    std::pair<const uint8_t*, size_t> bytes() {
+        uint64_t len = varint();
+        if (p_ + len > end_) len = static_cast<uint64_t>(end_ - p_);
+        const uint8_t* s = p_;
+        p_ += len;
+        return {s, static_cast<size_t>(len)};
+    }
+    void skip(uint32_t wire) {
+        switch (wire) {
+            case 0: varint(); break;
+            case 1: p_ = std::min(p_ + 8, end_); break;
+            case 2: bytes(); break;
+            case 5: p_ = std::min(p_ + 4, end_); break;
+            default: p_ = end_; break;
+        }
+    }
+
+private:
+    const uint8_t* p_;
+    const uint8_t* end_;
+};
+
+std::vector<std::string> onnx_output_names(const void* data, size_t n) {
+    std::vector<std::string> names;
+    PbReader top(static_cast<const uint8_t*>(data), n);
+    const uint8_t* gp = nullptr;
+    size_t gn = 0;
+    uint32_t f = 0, w = 0;
+    while (top.tag(f, w)) {
+        if (f == 7 && w == 2) {  // ModelProto.graph
+            auto r = top.bytes();
+            gp = r.first;
+            gn = r.second;
+            break;
+        }
+        top.skip(w);
+    }
+    if (!gp) return names;
+    PbReader g(gp, gn);
+    while (g.tag(f, w)) {
+        if (f == 12 && w == 2) {  // GraphProto.output (ValueInfoProto)
+            auto vi = g.bytes();
+            PbReader r(vi.first, vi.second);
+            uint32_t f2 = 0, w2 = 0;
+            while (r.tag(f2, w2)) {
+                if (f2 == 1 && w2 == 2) {  // ValueInfoProto.name
+                    auto s = r.bytes();
+                    names.emplace_back(reinterpret_cast<const char*>(s.first),
+                                       s.second);
+                } else {
+                    r.skip(w2);
+                }
+            }
+        } else {
+            g.skip(w);
+        }
+    }
+    return names;
+}
 
 size_t bytes_per_elem(const migraphx::shape& s) {
     const size_t n = s.elements();
@@ -170,8 +260,7 @@ std::string pack_blob(const std::vector<IOTensor>& ios, const std::string& mxr) 
 
 }  // namespace
 
-IOInfo introspect(const void* onnx, size_t n,
-                  const std::vector<std::string>& output_names) {
+IOInfo introspect(const void* onnx, size_t n) {
     // Parameter and output shapes are only reliable after compilation, so
     // compile for the GPU target here as well. The network token needs this to
     // answer getInput/getOutput dimensions before buildSerializedNetwork runs.
@@ -182,16 +271,15 @@ IOInfo introspect(const void* onnx, size_t n,
     prog.compile(gpu, copts);
     IOInfo info;
     info.inputs = collect_inputs(prog);
-    info.outputs = collect_outputs(prog, output_names);
+    info.outputs = collect_outputs(prog, onnx_output_names(onnx, n));
     return info;
 }
 
-std::string build(const void* onnx, size_t n, const BuildOptions& opts,
-                  const std::vector<std::string>& output_names) {
+std::string build(const void* onnx, size_t n, const BuildOptions& opts) {
     auto prog = migraphx::parse_onnx_buffer(onnx, n);
     apply_quantization(prog, opts);
 
-    auto outs = collect_outputs(prog, output_names);  // names before compile
+    auto outs = collect_outputs(prog, onnx_output_names(onnx, n));
 
     migraphx::target gpu("gpu");
     migraphx::compile_options copts;

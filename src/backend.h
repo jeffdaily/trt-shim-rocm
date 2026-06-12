@@ -51,22 +51,19 @@ public:
                      void* stream) = 0;
 };
 
-// Parse an ONNX model and report its inputs/outputs without compiling. Used by
-// the network token so the sample can query input/output dimensions after
-// parsing. output_names, when non-empty, supplies real ONNX output names
-// (MIGraphX does not expose them); otherwise names are synthesized.
+// Parse an ONNX model and report its inputs/outputs. Used by the network token
+// so the sample can query input/output dimensions after parsing. Output names
+// are recovered from the ONNX bytes (MIGraphX does not expose them).
 struct IOInfo {
     std::vector<IOTensor> inputs;
     std::vector<IOTensor> outputs;
 };
-IOInfo introspect(const void* onnx, size_t n,
-                  const std::vector<std::string>& output_names);
+IOInfo introspect(const void* onnx, size_t n);
 
 // Build: parse ONNX, apply flags, compile for the GPU, and return a serialized
 // engine blob (magic header + IO metadata + MIGraphX program). Throws
 // std::runtime_error on failure.
-std::string build(const void* onnx, size_t n, const BuildOptions& opts,
-                  const std::vector<std::string>& output_names);
+std::string build(const void* onnx, size_t n, const BuildOptions& opts);
 
 // Load a serialized engine blob produced by build(). Returns nullptr and sets
 // err if the blob is not ours (e.g. an NVIDIA .engine).

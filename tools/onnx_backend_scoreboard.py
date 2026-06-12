@@ -4,11 +4,11 @@
 #
 # ONNX operator-conformance scoreboard for the shim. Drives the standardized
 # onnx.backend.test node test cases (shipped with the onnx package) through the
-# shim's generic runner (trt_infer) on the GPU and compares each output to the
+# shim's generic runner (trtshim_infer) on the GPU and compares each output to the
 # ONNX expected result. Produces a per-operator pass/fail/skip scoreboard --
 # the empirical feature-completeness picture.
 #
-# Usage: onnx_backend_scoreboard.py <trt_infer> [limit] [filter]
+# Usage: onnx_backend_scoreboard.py <trtshim_infer> [limit] [filter]
 # Writes a summary to stdout and test/onnx_scoreboard.md.
 
 import os
@@ -111,7 +111,7 @@ def main():
 
     total = sum(tally.values())
     lines = ["# ONNX backend-test scoreboard (shim on gfx90a)", "",
-             f"Ran {total} node test cases through trt_infer.", "",
+             f"Ran {total} node test cases through trtshim_infer.", "",
              f"- pass: {tally['pass']}", f"- fail: {tally['fail']}",
              f"- skip: {tally['skip']}", ""]
     # operators fully passing vs failing

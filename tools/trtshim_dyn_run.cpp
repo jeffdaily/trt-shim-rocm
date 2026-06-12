@@ -7,7 +7,7 @@
 // createOptimizationProfile/setDimensions/addOptimizationProfile and
 // setInputShape.
 //
-// Usage: dyn_run <dyn_model.onnx> <input2.bin> <golden.txt(=a0 a1)>
+// Usage: trtshim_dyn_run <dyn_model.onnx> <input2.bin> <golden.txt(=a0 a1)>
 
 #include <algorithm>
 #include <cstdio>

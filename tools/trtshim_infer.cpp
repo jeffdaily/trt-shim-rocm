@@ -6,7 +6,7 @@
 // raw input files by tensor name, runs, and writes each output as raw bytes.
 // The Python harness compares the outputs against the ONNX expected results.
 //
-// Usage: trt_infer <model.onnx> <outdir> <name=infile> [<name=infile> ...]
+// Usage: trtshim_infer <model.onnx> <outdir> <name=infile> [<name=infile> ...]
 // Prints one "OUT <name> <datatype> <d0,d1,...>" line per output.
 
 #include <algorithm>

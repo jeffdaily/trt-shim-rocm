@@ -98,7 +98,7 @@ target_link_libraries(sampleOnnxMNIST PRIVATE
 set_target_properties(sampleOnnxMNIST PROPERTIES BUILD_RPATH ${CMAKE_BINARY_DIR})
 
 # Flexible driver for fp16 + serialize round-trip validation on real models.
-foreach(drv trtshim_run dyn_run trt_infer)
+foreach(drv trtshim_run trtshim_dyn_run trtshim_infer)
   add_executable(${drv} tools/${drv}.cpp)
   add_dependencies(${drv} aliases)
   target_include_directories(${drv} PRIVATE
@@ -137,7 +137,7 @@ add_test(NAME trtshim_run_load
   COMMAND trtshim_run ${MODEL} ${INPUT} ${GOLD} --load ${CMAKE_BINARY_DIR}/rt.engine)
 set_tests_properties(trtshim_run_save PROPERTIES FIXTURES_SETUP RTENGINE)
 set_tests_properties(trtshim_run_load PROPERTIES FIXTURES_REQUIRED RTENGINE)
-add_test(NAME dyn_run COMMAND dyn_run
+add_test(NAME trtshim_dyn_run COMMAND trtshim_dyn_run
   ${CMAKE_CURRENT_SOURCE_DIR}/test/models/dyn_cnn.onnx
   ${CMAKE_CURRENT_SOURCE_DIR}/test/golden/dyn_input2.bin
   ${CMAKE_CURRENT_SOURCE_DIR}/test/golden/dyn_golden.txt)

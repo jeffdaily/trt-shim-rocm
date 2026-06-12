@@ -34,6 +34,7 @@ What works today, validated on real GPU:
 | ONNX model -> build engine -> infer | stock `sampleOnnxMNIST`; `trtshim_run` |
 | Link-level drop-in (`-lnvinfer`) | `sampleOnnxMNIST` links the alias, `ldd` resolves to libtrtshim |
 | Stock `trtexec` (dlopen drop-in) | unmodified NVIDIA `trtexec --onnx/--fp16/--int8/--save+loadEngine` runs and reports metrics on AMD |
+| CUDA graphs | `trtexec --useCudaGraph` really captures a HIP graph (zero-copy run path); ~4.6x throughput on the MNIST model |
 | fp16 | `trtshim_run --fp16` on ResNet-50 (matches onnxruntime) |
 | int8 (calibration) | `trtshim_run --int8`; IInt8Calibrator -> migraphx::quantize_int8 |
 | Engine serialize/deserialize (cross-process) | `trtshim_run --save/--load`; rejects NVIDIA `.engine` |

@@ -192,4 +192,12 @@ if(BUILD_TRTEXEC)
   set_tests_properties(trtexec PROPERTIES
     ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
     PASS_REGULAR_EXPRESSION "PASSED TensorRT.trtexec")
+  # --useCudaGraph must really capture (zero-copy run path is HIP-graph
+  # capturable), not just pass via fallback.
+  add_test(NAME trtexec_cudagraph
+    COMMAND trtexec --onnx=${CMAKE_CURRENT_SOURCE_DIR}/test/mnist/mnist.onnx
+            --useCudaGraph)
+  set_tests_properties(trtexec_cudagraph PROPERTIES
+    ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}"
+    PASS_REGULAR_EXPRESSION "Successfully captured CUDA graph")
 endif()

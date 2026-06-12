@@ -141,42 +141,54 @@ migraphx::program program_from_bytes(const std::string& bytes) {
     return prog;
 }
 
-std::vector<IOTensor> collect_inputs(const migraphx::program& prog) {
-    std::vector<IOTensor> ins;
-    auto shapes = prog.get_parameter_shapes();
-    for (const char* name : shapes.names()) {
-        auto s = shapes[name];
-        auto lengths = s.lengths();  // single call: begin()/end() must match
-        IOTensor t;
-        t.name = name;
-        t.dims.assign(lengths.begin(), lengths.end());
-        t.datatype = s.type();
-        t.bytes_per_elem = bytes_per_elem(s);
-        t.dir = IODir::kInput;
-        ins.push_back(std::move(t));
-    }
-    return ins;
+// With offload_copy=false, MIGraphX exposes program OUTPUTS as bindable
+// parameters named "main:#output_<N>"; every other parameter is a model input.
+// Binding a caller device buffer to an output param makes MIGraphX write the
+// result there directly (zero-copy), and the resulting run_async is HIP-graph
+// capturable -- which is why the run path uses offload_copy=false.
+constexpr char kOutputPrefix[] = "main:#output_";
+
+bool is_output_param(const std::string& name) {
+    return name.compare(0, sizeof(kOutputPrefix) - 1, kOutputPrefix) == 0;
+}
+int output_index(const std::string& name) {
+    return std::stoi(name.substr(sizeof(kOutputPrefix) - 1));
 }
 
-std::vector<IOTensor> collect_outputs(const migraphx::program& prog,
-                                      const std::vector<std::string>& names) {
-    std::vector<IOTensor> outs;
-    auto shapes = prog.get_output_shapes();
-    for (size_t i = 0; i < shapes.size(); ++i) {
-        auto s = shapes[i];
-        IOTensor t;
-        t.name = (i < names.size() && !names[i].empty())
-                     ? names[i]
-                     : (shapes.size() == 1 ? std::string("output")
-                                           : "output_" + std::to_string(i));
-        auto lengths = s.lengths();  // single call: begin()/end() must match
-        t.dims.assign(lengths.begin(), lengths.end());
-        t.datatype = s.type();
-        t.bytes_per_elem = bytes_per_elem(s);
-        t.dir = IODir::kOutput;
-        outs.push_back(std::move(t));
+IOTensor io_from_shape(const std::string& name, const migraphx::shape& s,
+                       IODir dir) {
+    IOTensor t;
+    t.name = name;
+    auto lengths = s.lengths();  // single call: begin()/end() must match
+    t.dims.assign(lengths.begin(), lengths.end());
+    t.datatype = s.type();
+    t.bytes_per_elem = bytes_per_elem(s);
+    t.dir = dir;
+    return t;
+}
+
+// Split an offload_copy=false program's parameters into model inputs and
+// outputs (outputs ordered by their #output_<N> index, named from the ONNX
+// graph outputs).
+void split_io(const migraphx::program& prog,
+              const std::vector<std::string>& onnx_names,
+              std::vector<IOTensor>& inputs, std::vector<IOTensor>& outputs) {
+    auto shapes = prog.get_parameter_shapes();
+    std::map<int, IOTensor> outs;
+    for (const char* cname : shapes.names()) {
+        std::string name = cname;
+        if (is_output_param(name)) {
+            int idx = output_index(name);
+            std::string real = (static_cast<size_t>(idx) < onnx_names.size() &&
+                                !onnx_names[idx].empty())
+                                   ? onnx_names[idx]
+                                   : "output_" + std::to_string(idx);
+            outs[idx] = io_from_shape(real, shapes[cname], IODir::kOutput);
+        } else {
+            inputs.push_back(io_from_shape(name, shapes[cname], IODir::kInput));
+        }
     }
-    return outs;
+    for (auto& kv : outs) outputs.push_back(std::move(kv.second));
 }
 
 void apply_quantization(migraphx::program& prog, const BuildOptions& opts) {
@@ -189,72 +201,155 @@ public:
     EngineImpl(migraphx::program prog, std::vector<IOTensor> ios)
         : prog_(std::move(prog)), ios_(std::move(ios)) {
         for (const auto& io : ios_) {
-            if (io.dir == IODir::kInput) dtype_[io.name] = io.datatype;
+            if (io.dir == IODir::kInput) inputs_[io.name] = &io;
+            else outputs_.push_back(&io);
         }
+        // Static engines compile with offload_copy=false, exposing output
+        // parameters we bind directly (zero-copy, graph-capturable). Dynamic
+        // engines compile with offload_copy=true (MIGraphX's dynamic dispatch
+        // is unstable under offload_copy=false), so they have no output params
+        // and use the host-staging path.
+        for (const char* nm : prog_.get_parameter_shapes().names())
+            if (is_output_param(nm)) zero_copy_ = true;
     }
 
     const std::vector<IOTensor>& ios() const override { return ios_; }
 
     bool run(const std::map<std::string, void*>& device_ptrs,
              const std::map<std::string, std::vector<int64_t>>& concrete,
-             void* /*stream*/) override {
-        // The program is compiled with offload_copy=true, so MIGraphX owns the
-        // device scratch and eval takes/returns HOST buffers. TensorRT hands us
-        // DEVICE pointers, so we stage each input device->host before eval and
-        // copy each output host->device after. (A true zero-copy path using
-        // offload_copy=false and caller device pointers is a later
-        // optimization.)
-        migraphx::program_parameters params;
-        auto pshapes = prog_.get_parameter_shapes();
-        auto names = pshapes.names();
-        std::vector<std::vector<char>> staging;
-        staging.reserve(names.size());  // keep argument pointers stable
-        for (const char* name : names) {
-            // Use the caller-supplied concrete shape for a dynamic input;
-            // otherwise the program's static parameter shape.
-            migraphx::shape s = pshapes[name];
-            auto cit = concrete.find(name);
-            if (cit != concrete.end()) {
-                std::vector<size_t> lengths(cit->second.begin(),
-                                            cit->second.end());
-                auto dt = dtype_.find(name);
-                s = migraphx::shape(
-                    static_cast<migraphx_shape_datatype_t>(
-                        dt == dtype_.end() ? 4 : dt->second),
-                    lengths);
-            }
-            auto it = device_ptrs.find(name);
-            if (it == device_ptrs.end()) return false;  // unbound input
-            staging.emplace_back(s.bytes());
-            if (hipMemcpy(staging.back().data(), it->second, s.bytes(),
-                          hipMemcpyDeviceToHost) != hipSuccess) {
-                return false;
-            }
-            params.add(name, migraphx::argument(s, staging.back().data()));
-        }
-
-        auto results = prog_.eval(params);
-
-        size_t oi = 0;
-        for (const auto& io : ios_) {
-            if (io.dir != IODir::kOutput) continue;
-            if (oi >= results.size()) return false;
-            auto it = device_ptrs.find(io.name);
-            if (it == device_ptrs.end()) return false;
-            auto arg = results[oi++];
-            const size_t nbytes = arg.get_shape().bytes();
-            if (hipMemcpy(it->second, arg.data(), nbytes,
-                          hipMemcpyHostToDevice) != hipSuccess) {
-                return false;
-            }
-        }
-        return true;
+             void* stream) override {
+        return zero_copy_ ? run_zero_copy(device_ptrs, concrete, stream)
+                          : run_staged(device_ptrs, concrete);
     }
 
 private:
+    // Zero-copy, graph-capturable path: bind caller device buffers for inputs
+    // AND outputs (MIGraphX writes results straight into the bound output
+    // buffers), then run on the caller's stream.
+    bool run_zero_copy(const std::map<std::string, void*>& device_ptrs,
+                       const std::map<std::string, std::vector<int64_t>>& concrete,
+                       void* stream) {
+        try {
+            const int64_t batch = dynamic_batch(concrete);
+            migraphx::program_parameters params;
+            auto pshapes = prog_.get_parameter_shapes();
+            for (const char* cname : pshapes.names()) {
+                const std::string pname = cname;
+                std::string io_name;
+                std::vector<int64_t> dims;
+                int dt = 4;  // migraphx float_type
+                if (is_output_param(pname)) {
+                    int idx = output_index(pname);
+                    if (idx < 0 || static_cast<size_t>(idx) >= outputs_.size())
+                        return false;
+                    io_name = outputs_[idx]->name;
+                    dims = resolve(outputs_[idx]->dims, batch);
+                    dt = outputs_[idx]->datatype;
+                } else {
+                    io_name = pname;
+                    auto in = inputs_.find(pname);
+                    if (in != inputs_.end()) dt = in->second->datatype;
+                    auto cit = concrete.find(pname);
+                    if (cit != concrete.end()) {
+                        dims = cit->second;
+                    } else if (in != inputs_.end()) {
+                        dims = resolve(in->second->dims, batch);
+                    }
+                }
+                auto it = device_ptrs.find(io_name);
+                if (it == device_ptrs.end()) return false;  // unbound IO
+                std::vector<size_t> lengths(dims.begin(), dims.end());
+                migraphx::shape s(static_cast<migraphx_shape_datatype_t>(dt),
+                                  lengths);
+                params.add(pname.c_str(), migraphx::argument(s, it->second));
+            }
+            if (stream) {
+                prog_.run_async(params, static_cast<hipStream_t>(stream));
+            } else {
+                prog_.eval(params);
+            }
+            return true;
+        } catch (const std::exception&) {
+            return false;
+        }
+    }
+
+private:
+    // The dynamic batch is the concrete value at an axis the static metadata
+    // marked -1; 1 when nothing is dynamic.
+    int64_t dynamic_batch(
+        const std::map<std::string, std::vector<int64_t>>& concrete) const {
+        for (const auto& kv : concrete) {
+            auto it = inputs_.find(kv.first);
+            if (it == inputs_.end()) continue;
+            const auto& meta = it->second->dims;
+            for (size_t a = 0; a < meta.size() && a < kv.second.size(); ++a)
+                if (meta[a] < 0) return kv.second[a];
+        }
+        return 1;
+    }
+    static std::vector<int64_t> resolve(std::vector<int64_t> dims,
+                                        int64_t batch) {
+        for (auto& d : dims)
+            if (d < 0) d = batch;
+        return dims;
+    }
+
+    // Host-staging path for offload_copy=true engines (dynamic shapes): copy
+    // each input device->host, eval (MIGraphX manages device scratch and
+    // returns host outputs), copy each output host->device.
+    bool run_staged(const std::map<std::string, void*>& device_ptrs,
+                    const std::map<std::string, std::vector<int64_t>>& concrete) {
+        try {
+            const int64_t batch = dynamic_batch(concrete);
+            migraphx::program_parameters params;
+            auto pshapes = prog_.get_parameter_shapes();
+            auto names = pshapes.names();
+            std::vector<std::vector<char>> staging;
+            staging.reserve(names.size());  // keep argument pointers stable
+            for (const char* cname : names) {
+                const std::string name = cname;
+                migraphx::shape s = pshapes[cname];
+                auto cit = concrete.find(name);
+                if (cit != concrete.end()) {
+                    auto in = inputs_.find(name);
+                    std::vector<size_t> lengths(cit->second.begin(),
+                                                cit->second.end());
+                    s = migraphx::shape(static_cast<migraphx_shape_datatype_t>(
+                                            in != inputs_.end() ? in->second->datatype
+                                                                : 4),
+                                        lengths);
+                }
+                auto it = device_ptrs.find(name);
+                if (it == device_ptrs.end()) return false;
+                staging.emplace_back(s.bytes());
+                if (hipMemcpy(staging.back().data(), it->second, s.bytes(),
+                              hipMemcpyDeviceToHost) != hipSuccess)
+                    return false;
+                params.add(cname, migraphx::argument(s, staging.back().data()));
+            }
+            auto results = prog_.eval(params);
+            size_t oi = 0;
+            for (const auto* out : outputs_) {
+                if (oi >= results.size()) return false;
+                auto it = device_ptrs.find(out->name);
+                if (it == device_ptrs.end()) return false;
+                auto arg = results[oi++];
+                if (hipMemcpy(it->second, arg.data(), arg.get_shape().bytes(),
+                              hipMemcpyHostToDevice) != hipSuccess)
+                    return false;
+            }
+            return true;
+        } catch (const std::exception&) {
+            return false;
+        }
+    }
+
     migraphx::program prog_;
     std::vector<IOTensor> ios_;
-    std::map<std::string, int> dtype_;
+    std::map<std::string, const IOTensor*> inputs_;
+    std::vector<const IOTensor*> outputs_;
+    bool zero_copy_ = false;
 };
 
 std::string pack_blob(const std::vector<IOTensor>& ios, const std::string& mxr) {
@@ -287,11 +382,10 @@ IOInfo introspect(const void* onnx, size_t n) {
     auto prog = migraphx::parse_onnx_buffer(onnx, n, oopts);
     migraphx::target gpu("gpu");
     migraphx::compile_options copts;
-    copts.set_offload_copy(true);
+    copts.set_offload_copy(false);
     prog.compile(gpu, copts);
     IOInfo info;
-    info.inputs = collect_inputs(prog);
-    info.outputs = collect_outputs(prog, onnx_output_names(onnx, n));
+    split_io(prog, onnx_output_names(onnx, n), info.inputs, info.outputs);
     return info;
 }
 
@@ -310,7 +404,15 @@ std::string build(const void* onnx, size_t n, const BuildOptions& opts,
     // int8 quantization runs on the uncompiled program: drive calibration
     // batches from the source into migraphx::quantize_int8 before compiling.
     if (opts.int8 && calib) {
-        auto inputs = collect_inputs(prog);
+        // Pre-compile, the parsed program's parameters are exactly the model
+        // inputs (the offload_copy=false output params appear only after
+        // compilation), so every parameter here is an input.
+        std::vector<IOTensor> inputs;
+        {
+            auto sh = prog.get_parameter_shapes();
+            for (const char* nm : sh.names())
+                inputs.push_back(io_from_shape(nm, sh[nm], IODir::kInput));
+        }
         migraphx::target gpu_t("gpu");
         migraphx::quantize_int8_options qopts;
         std::vector<std::unique_ptr<CalibrationData>> kept;
@@ -337,7 +439,9 @@ std::string build(const void* onnx, size_t n, const BuildOptions& opts,
 
     migraphx::target gpu("gpu");
     migraphx::compile_options copts;
-    copts.set_offload_copy(true);
+    // Static -> offload_copy=false (zero-copy, graph-capturable); dynamic ->
+    // offload_copy=true (MIGraphX's dynamic dispatch is unstable otherwise).
+    copts.set_offload_copy(dyn != nullptr);
     prog.compile(gpu, copts);
 
     std::vector<IOTensor> ios;
@@ -357,8 +461,8 @@ std::string build(const void* onnx, size_t n, const BuildOptions& opts,
             }
         }
     } else {
-        ios = collect_inputs(prog);
-        auto outs = collect_outputs(prog, onnx_output_names(onnx, n));
+        std::vector<IOTensor> outs;
+        split_io(prog, onnx_output_names(onnx, n), ios, outs);
         ios.insert(ios.end(), outs.begin(), outs.end());
     }
 
@@ -373,27 +477,45 @@ std::unique_ptr<Engine> load(const void* blob, size_t n, std::string& err) {
         return nullptr;
     }
     size_t off = sizeof(kMagic);
+    // All reads are bounds-checked against n: a truncated or corrupt blob that
+    // still carries the magic header must fail cleanly, not over-read.
+    bool ok = true;
+    auto need = [&](size_t k) {
+        if (!ok || off > n || k > n - off) ok = false;
+        return ok;
+    };
     auto get_u32 = [&](uint32_t& v) {
+        if (!need(4)) return;
         std::memcpy(&v, p + off, 4);
         off += 4;
     };
     auto get_u64 = [&](uint64_t& v) {
+        if (!need(8)) return;
         std::memcpy(&v, p + off, 8);
         off += 8;
     };
+    auto corrupt = [&]() -> std::unique_ptr<Engine> {
+        err = "corrupt or truncated trt-shim-rocm engine";
+        return nullptr;
+    };
+
     uint32_t n_io = 0;
     get_u32(n_io);
+    if (!ok || n_io > n) return corrupt();  // each IO needs >= 14 bytes
     std::vector<IOTensor> ios(n_io);
     for (auto& io : ios) {
+        if (!need(2)) return corrupt();
         io.dir = static_cast<IODir>(p[off++]);
         io.datatype = static_cast<unsigned char>(p[off++]);
         uint32_t bpe = 0, namelen = 0, ndim = 0;
         get_u32(bpe);
         io.bytes_per_elem = bpe;
         get_u32(namelen);
+        if (!need(namelen)) return corrupt();
         io.name.assign(p + off, namelen);
         off += namelen;
         get_u32(ndim);
+        if (!ok || ndim > n) return corrupt();
         io.dims.resize(ndim);
         for (uint32_t i = 0; i < ndim; ++i) {
             uint64_t d = 0;
@@ -403,6 +525,7 @@ std::unique_ptr<Engine> load(const void* blob, size_t n, std::string& err) {
     }
     uint64_t mxr_len = 0;
     get_u64(mxr_len);
+    if (!ok || !need(static_cast<size_t>(mxr_len))) return corrupt();
     std::string mxr(p + off, mxr_len);
 
     try {

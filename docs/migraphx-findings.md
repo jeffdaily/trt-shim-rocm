@@ -51,7 +51,21 @@ A `save_buffer`/`load_buffer` pair would let the shim implement
 `IHostMemory`-based engine serialization without touching the filesystem.
 Severity: low.
 
-## 4. No accessor for computed int8 scales (feature request)
+## 4. Dynamic program crashes under offload_copy=false (codegen/runtime bug)
+
+Evaluating a program compiled with a dynamic dimension
+(`set_default_dyn_dim_value`) AND `offload_copy=false` segfaults inside MIGraphX,
+in `op::select_module::compute` -> `shape::operator==` (the dynamic-shape
+dispatch). The same dynamic program with `offload_copy=true` runs fine, and a
+static program with `offload_copy=false` runs fine -- it is specifically the
+dynamic + offload_copy=false combination. This forced the shim to keep dynamic
+engines on the (non-graph-capturable) `offload_copy=true` host-staging path while
+static engines use the faster, HIP-graph-capturable `offload_copy=false`
+zero-copy path. Severity: medium (blocks zero-copy/graph capture for dynamic
+shapes). Backtrace in the shim's git history; reproducible by compiling any
+dynamic-batch ONNX model with offload_copy=false and calling eval.
+
+## 5. No accessor for computed int8 scales (feature request)
 
 int8 *quantization* works: `migraphx::quantize_int8` on the gpu target quantizes
 correctly, and the shim's IInt8Calibrator bridge is validated on a small CNN and

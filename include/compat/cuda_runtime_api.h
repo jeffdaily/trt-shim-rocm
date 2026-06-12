@@ -32,10 +32,9 @@ using cudaDeviceAttr = hipDeviceAttribute_t;
 using cudaLimit = hipLimit_t;
 using cudaStreamCaptureMode = hipStreamCaptureMode;
 
-// CUDA graph types are only referenced by helper code that the simple samples
-// never instantiate; keep them as opaque handles independent of HIP graphs.
-using cudaGraph_t = struct trtshimCudaGraph*;
-using cudaGraphExec_t = struct trtshimCudaGraphExec*;
+using cudaGraph_t = hipGraph_t;
+using cudaGraphExec_t = hipGraphExec_t;
+using cudaGraphNode_t = hipGraphNode_t;
 
 // ---- enum / constant values ----------------------------------------------
 constexpr cudaError_t cudaSuccess = hipSuccess;
@@ -160,21 +159,29 @@ inline cudaError_t cudaPointerGetAttributes(cudaPointerAttributes* a,
     return hipPointerGetAttributes(a, p);
 }
 
-// ---- CUDA graph capture: stubbed (compile-only for the simple samples) -----
-inline cudaError_t cudaStreamBeginCapture(cudaStream_t, cudaStreamCaptureMode) {
-    return cudaSuccess;
+// ---- CUDA graph capture -> HIP graphs --------------------------------------
+// Real forwarders. Whether a capture succeeds depends on the captured work
+// being stream-async (see ShimContext::enqueueV3); if it is not, HIP returns
+// hipErrorStreamCaptureInvalidated and the consumer (e.g. trtexec) falls back
+// to non-graph execution -- which is correct, never silently wrong.
+inline cudaError_t cudaStreamBeginCapture(cudaStream_t s,
+                                          cudaStreamCaptureMode m) {
+    return hipStreamBeginCapture(s, m);
 }
-inline cudaError_t cudaStreamEndCapture(cudaStream_t, cudaGraph_t*) {
-    return cudaSuccess;
+inline cudaError_t cudaStreamEndCapture(cudaStream_t s, cudaGraph_t* g) {
+    return hipStreamEndCapture(s, g);
 }
-inline cudaError_t cudaGraphInstantiate(cudaGraphExec_t*, cudaGraph_t, void*,
-                                        void*, size_t) {
-    return cudaSuccess;
+inline cudaError_t cudaGraphInstantiate(cudaGraphExec_t* e, cudaGraph_t g,
+                                        cudaGraphNode_t* errNode, char* logBuf,
+                                        size_t bufSize) {
+    return hipGraphInstantiate(e, g, errNode, logBuf, bufSize);
 }
-inline cudaError_t cudaGraphLaunch(cudaGraphExec_t, cudaStream_t) {
-    return cudaSuccess;
+inline cudaError_t cudaGraphLaunch(cudaGraphExec_t e, cudaStream_t s) {
+    return hipGraphLaunch(e, s);
 }
-inline cudaError_t cudaGraphDestroy(cudaGraph_t) { return cudaSuccess; }
-inline cudaError_t cudaGraphExecDestroy(cudaGraphExec_t) { return cudaSuccess; }
+inline cudaError_t cudaGraphDestroy(cudaGraph_t g) { return hipGraphDestroy(g); }
+inline cudaError_t cudaGraphExecDestroy(cudaGraphExec_t e) {
+    return hipGraphExecDestroy(e);
+}
 
 #endif  // TRT_SHIM_ROCM_COMPAT_CUDA_RUNTIME_API_H

@@ -110,11 +110,19 @@ Key MIGraphX facts the bridge relies on (see `docs/migraphx-findings.md` for
 the gaps):
 - `parse_onnx_buffer(data, size, onnx_options)`; `onnx_options` pins free dims
   (`set_default_dim_value(1)`) or makes them dynamic (`set_default_dyn_dim_value`).
-- Compile with `offload_copy=true`: MIGraphX owns device scratch and `eval`
-  takes/returns **host** buffers. TensorRT hands us **device** pointers, so
-  `Engine::run` stages each input device->host before eval and copies each
-  output host->device after. (A true zero-copy path with `offload_copy=false`
-  exists but exposes messy scratch params; deferred.)
+- The run path is **hybrid**, chosen at build:
+  - **Static engines compile with `offload_copy=false`.** This exposes program
+    outputs as bindable parameters named `main:#output_<N>`, so `Engine::run`
+    binds the caller's device buffers for inputs AND outputs -- MIGraphX writes
+    results straight into the caller's output buffer (**zero-copy**) -- and runs
+    via `run_async` on the caller's stream. That run is **HIP-graph capturable**,
+    so `enqueueV3` under CUDA-graph capture works (trtexec `--useCudaGraph`).
+  - **Dynamic engines compile with `offload_copy=true`** and use a host-staging
+    fallback (stage inputs device->host, `eval`, copy outputs host->device).
+    MIGraphX's dynamic `select_module` dispatch crashes under `offload_copy=false`
+    (a MIGraphX bug), so dynamic engines are not graph-capturable for now.
+  `EngineImpl` picks the path by whether the program exposes `main:#output_<N>`
+  parameters.
 - `get_parameter_shapes()` gives input names+shapes; **outputs are positional**
   (no names). We recover ONNX output names with a ~60-line protobuf walk
   (`onnx_output_names` in `backend.cpp`) so the engine reports the real names

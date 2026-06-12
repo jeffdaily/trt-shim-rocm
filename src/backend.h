@@ -62,10 +62,20 @@ public:
 
     // Run synchronously (stream == nullptr) or async on the given hipStream_t.
     // device_ptrs maps every IO tensor name to a caller-owned device buffer.
-    // Outputs are copied into the caller's output buffers. Returns false on
-    // error.
+    // concrete supplies the runtime shape for any dynamic input (name -> dims);
+    // static inputs may be omitted. Outputs are copied into the caller's
+    // buffers. Returns false on error.
     virtual bool run(const std::map<std::string, void*>& device_ptrs,
+                     const std::map<std::string, std::vector<int64_t>>& concrete,
                      void* stream) = 0;
+};
+
+// A single dynamic input axis (e.g. dynamic batch) described by an optimization
+// profile. Single-axis only in this phase.
+struct DynamicAxis {
+    std::string input;
+    int axis = 0;
+    int64_t min = 1, opt = 1, max = 1;
 };
 
 // Parse an ONNX model and report its inputs/outputs. Used by the network token
@@ -82,7 +92,8 @@ IOInfo introspect(const void* onnx, size_t n);
 // is set and calib is non-null, calibration batches drive migraphx int8
 // quantization. Throws std::runtime_error on failure.
 std::string build(const void* onnx, size_t n, const BuildOptions& opts,
-                  CalibrationSource* calib = nullptr);
+                  CalibrationSource* calib = nullptr,
+                  const DynamicAxis* dyn = nullptr);
 
 // Load a serialized engine blob produced by build(). Returns nullptr and sets
 // err if the blob is not ours (e.g. an NVIDIA .engine).

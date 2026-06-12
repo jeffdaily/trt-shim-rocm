@@ -8,6 +8,7 @@
 // mImpl=this. Critical-path methods are implemented here; the rest are trivial
 // overrides included from src/generated/*.stubs.inc.
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -159,6 +160,50 @@ private:
     std::vector<std::unique_ptr<ShimTensor>> outputs_;
 };
 
+// ---- IOptimizationProfile ------------------------------------------------
+class ShimOptimizationProfile : public nvinfer1::IOptimizationProfile,
+                                public nvinfer1::apiv::VOptimizationProfile {
+public:
+    ShimOptimizationProfile() { mImpl = this; }
+    bool setDimensions(char const* name, nvinfer1::OptProfileSelector sel,
+                       nvinfer1::Dims const& dims) noexcept override {
+        dims_[name][static_cast<int>(sel)] = dims;
+        return true;
+    }
+    nvinfer1::Dims getDimensions(
+        char const* name, nvinfer1::OptProfileSelector sel) const noexcept override {
+        auto it = dims_.find(name);
+        return it == dims_.end() ? nvinfer1::Dims{}
+                                 : it->second[static_cast<int>(sel)];
+    }
+    bool isValid() const noexcept override { return !dims_.empty(); }
+
+    // Derive the single dynamic axis (the one where kMIN != kMAX). Returns
+    // false if the profile pins everything (no dynamic dimension).
+    bool dynamicAxis(DynamicAxis& out) const {
+        for (const auto& kv : dims_) {
+            const auto& mn = kv.second[0];  // kMIN
+            const auto& op = kv.second[1];  // kOPT
+            const auto& mx = kv.second[2];  // kMAX
+            for (int a = 0; a < mn.nbDims && a < mx.nbDims; ++a) {
+                if (mn.d[a] != mx.d[a]) {
+                    out.input = kv.first;
+                    out.axis = a;
+                    out.min = mn.d[a];
+                    out.max = mx.d[a];
+                    out.opt = a < op.nbDims ? op.d[a] : mn.d[a];
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+#include "generated/VOptimizationProfile.stubs.inc"
+
+private:
+    std::map<std::string, std::array<nvinfer1::Dims, 3>> dims_;
+};
+
 // ---- IBuilderConfig ------------------------------------------------------
 class ShimConfig : public nvinfer1::IBuilderConfig,
                    public nvinfer1::apiv::VBuilderConfig {
@@ -220,17 +265,19 @@ public:
         addrs_[name] = data;
         return true;
     }
-    bool setInputShape(char const*, nvinfer1::Dims const&) noexcept override {
-        return true;  // static shapes in this phase
+    bool setInputShape(char const* name,
+                       nvinfer1::Dims const& dims) noexcept override {
+        shapes_[name].assign(dims.d, dims.d + dims.nbDims);
+        return true;
     }
     bool executeV2(void* const* bindings) noexcept override {
         std::map<std::string, void*> ptrs;
         for (size_t i = 0; i < ios_->size(); ++i)
             ptrs[(*ios_)[i].name] = bindings[i];
-        return engine_->run(ptrs, nullptr);
+        return engine_->run(ptrs, shapes_, nullptr);
     }
     bool enqueueV3(cudaStream_t stream) noexcept override {
-        return engine_->run(addrs_, static_cast<void*>(stream));
+        return engine_->run(addrs_, shapes_, static_cast<void*>(stream));
     }
 #include "generated/VExecutionContext.stubs.inc"
 
@@ -238,6 +285,7 @@ private:
     Engine* engine_;
     const std::vector<IOTensor>* ios_;
     std::map<std::string, void*> addrs_;
+    std::map<std::string, std::vector<int64_t>> shapes_;
 };
 
 // ---- ICudaEngine ---------------------------------------------------------
@@ -382,6 +430,9 @@ public:
         nvinfer1::NetworkDefinitionCreationFlags) noexcept override {
         return new ShimNetwork();
     }
+    nvinfer1::IOptimizationProfile* createOptimizationProfile() noexcept override {
+        return new ShimOptimizationProfile();
+    }
     nvinfer1::IHostMemory* buildSerializedNetwork(
         nvinfer1::INetworkDefinition& network,
         nvinfer1::IBuilderConfig& config) noexcept override {
@@ -393,8 +444,15 @@ public:
             if (opts.int8 && cfg.calibrator()) {
                 calib = std::make_unique<ShimCalibSource>(cfg.calibrator());
             }
+            DynamicAxis dyn;
+            const DynamicAxis* dynp = nullptr;
+            if (cfg.profile()) {
+                auto* prof = static_cast<const ShimOptimizationProfile*>(
+                    cfg.profile());
+                if (prof->dynamicAxis(dyn)) dynp = &dyn;
+            }
             std::string blob = build(net.onnx().data(), net.onnx().size(), opts,
-                                     calib.get());
+                                     calib.get(), dynp);
             return new ShimHostMemory(std::move(blob));
         } catch (const std::exception& e) {
             if (logger_) {

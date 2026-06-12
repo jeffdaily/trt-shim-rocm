@@ -187,11 +187,16 @@ void apply_quantization(migraphx::program& prog, const BuildOptions& opts) {
 class EngineImpl : public Engine {
 public:
     EngineImpl(migraphx::program prog, std::vector<IOTensor> ios)
-        : prog_(std::move(prog)), ios_(std::move(ios)) {}
+        : prog_(std::move(prog)), ios_(std::move(ios)) {
+        for (const auto& io : ios_) {
+            if (io.dir == IODir::kInput) dtype_[io.name] = io.datatype;
+        }
+    }
 
     const std::vector<IOTensor>& ios() const override { return ios_; }
 
     bool run(const std::map<std::string, void*>& device_ptrs,
+             const std::map<std::string, std::vector<int64_t>>& concrete,
              void* /*stream*/) override {
         // The program is compiled with offload_copy=true, so MIGraphX owns the
         // device scratch and eval takes/returns HOST buffers. TensorRT hands us
@@ -205,7 +210,19 @@ public:
         std::vector<std::vector<char>> staging;
         staging.reserve(names.size());  // keep argument pointers stable
         for (const char* name : names) {
-            auto s = pshapes[name];
+            // Use the caller-supplied concrete shape for a dynamic input;
+            // otherwise the program's static parameter shape.
+            migraphx::shape s = pshapes[name];
+            auto cit = concrete.find(name);
+            if (cit != concrete.end()) {
+                std::vector<size_t> lengths(cit->second.begin(),
+                                            cit->second.end());
+                auto dt = dtype_.find(name);
+                s = migraphx::shape(
+                    static_cast<migraphx_shape_datatype_t>(
+                        dt == dtype_.end() ? 4 : dt->second),
+                    lengths);
+            }
             auto it = device_ptrs.find(name);
             if (it == device_ptrs.end()) return false;  // unbound input
             staging.emplace_back(s.bytes());
@@ -237,6 +254,7 @@ public:
 private:
     migraphx::program prog_;
     std::vector<IOTensor> ios_;
+    std::map<std::string, int> dtype_;
 };
 
 std::string pack_blob(const std::vector<IOTensor>& ios, const std::string& mxr) {
@@ -278,9 +296,15 @@ IOInfo introspect(const void* onnx, size_t n) {
 }
 
 std::string build(const void* onnx, size_t n, const BuildOptions& opts,
-                  CalibrationSource* calib) {
+                  CalibrationSource* calib, const DynamicAxis* dyn) {
     migraphx::onnx_options oopts;
-    oopts.set_default_dim_value(1);  // pin free dims (e.g. dynamic batch) to 1
+    if (dyn) {
+        oopts.set_default_dyn_dim_value(migraphx::dynamic_dimension(
+            static_cast<size_t>(dyn->min), static_cast<size_t>(dyn->max),
+            migraphx::optimals{static_cast<size_t>(dyn->opt)}));
+    } else {
+        oopts.set_default_dim_value(1);  // pin free dims (e.g. dynamic batch)
+    }
     auto prog = migraphx::parse_onnx_buffer(onnx, n, oopts);
 
     // int8 quantization runs on the uncompiled program: drive calibration
@@ -311,15 +335,32 @@ std::string build(const void* onnx, size_t n, const BuildOptions& opts,
     }
     apply_quantization(prog, opts);
 
-    auto outs = collect_outputs(prog, onnx_output_names(onnx, n));
-
     migraphx::target gpu("gpu");
     migraphx::compile_options copts;
     copts.set_offload_copy(true);
     prog.compile(gpu, copts);
 
-    std::vector<IOTensor> ios = collect_inputs(prog);
-    ios.insert(ios.end(), outs.begin(), outs.end());
+    std::vector<IOTensor> ios;
+    if (dyn) {
+        // A dynamic program's shapes are not directly enumerable, so take
+        // static metadata from a fixed-dim parse and mark the dynamic axes -1.
+        auto sinfo = introspect(onnx, n);
+        ios = std::move(sinfo.inputs);
+        ios.insert(ios.end(), sinfo.outputs.begin(), sinfo.outputs.end());
+        for (auto& io : ios) {
+            if (io.dir == IODir::kInput && io.name == dyn->input &&
+                dyn->axis >= 0 && dyn->axis < static_cast<int>(io.dims.size())) {
+                io.dims[dyn->axis] = -1;
+            }
+            if (io.dir == IODir::kOutput && !io.dims.empty()) {
+                io.dims[0] = -1;  // output batch tracks the dynamic input batch
+            }
+        }
+    } else {
+        ios = collect_inputs(prog);
+        auto outs = collect_outputs(prog, onnx_output_names(onnx, n));
+        ios.insert(ios.end(), outs.begin(), outs.end());
+    }
 
     return pack_blob(ios, program_to_bytes(prog));
 }

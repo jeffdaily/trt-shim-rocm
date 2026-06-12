@@ -21,7 +21,8 @@ from pathlib import Path
 # Methods implemented by hand in shim.cpp, excluded from generation.
 EXCLUDE = {
     "VBuilder": {"createBuilderConfig", "createNetworkV2", "buildSerializedNetwork",
-                 "getLogger", "getPImpl"},
+                 "getLogger", "getPImpl", "createOptimizationProfile"},
+    "VOptimizationProfile": {"setDimensions", "getDimensions", "isValid"},
     "VNetworkDefinition": {"getInput", "getOutput", "getNbInputs", "getNbOutputs",
                            "getPImpl", "getName"},
     "VBuilderConfig": {"setFlag", "getFlag", "clearFlag", "getPImpl",

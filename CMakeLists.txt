@@ -98,16 +98,18 @@ target_link_libraries(sampleOnnxMNIST PRIVATE
 set_target_properties(sampleOnnxMNIST PROPERTIES BUILD_RPATH ${CMAKE_BINARY_DIR})
 
 # Flexible driver for fp16 + serialize round-trip validation on real models.
-add_executable(trt_run tools/trt_run.cpp)
-add_dependencies(trt_run aliases)
-target_include_directories(trt_run PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tensorrt-headers/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/compat)
-target_link_libraries(trt_run PRIVATE
-  ${CMAKE_BINARY_DIR}/libnvinfer.so
-  ${CMAKE_BINARY_DIR}/libnvonnxparser.so
-  hip::host)
-set_target_properties(trt_run PROPERTIES BUILD_RPATH ${CMAKE_BINARY_DIR})
+foreach(drv trt_run dyn_run)
+  add_executable(${drv} tools/${drv}.cpp)
+  add_dependencies(${drv} aliases)
+  target_include_directories(${drv} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tensorrt-headers/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/compat)
+  target_link_libraries(${drv} PRIVATE
+    ${CMAKE_BINARY_DIR}/libnvinfer.so
+    ${CMAKE_BINARY_DIR}/libnvonnxparser.so
+    hip::host)
+  set_target_properties(${drv} PROPERTIES BUILD_RPATH ${CMAKE_BINARY_DIR})
+endforeach()
 
 enable_testing()
 add_test(NAME migraphx_smoke COMMAND migraphx_smoke
@@ -135,3 +137,7 @@ add_test(NAME trt_run_load
   COMMAND trt_run ${MODEL} ${INPUT} ${GOLD} --load ${CMAKE_BINARY_DIR}/rt.engine)
 set_tests_properties(trt_run_save PROPERTIES FIXTURES_SETUP RTENGINE)
 set_tests_properties(trt_run_load PROPERTIES FIXTURES_REQUIRED RTENGINE)
+add_test(NAME dyn_run COMMAND dyn_run
+  ${CMAKE_CURRENT_SOURCE_DIR}/test/models/dyn_cnn.onnx
+  ${CMAKE_CURRENT_SOURCE_DIR}/test/golden/dyn_input2.bin
+  ${CMAKE_CURRENT_SOURCE_DIR}/test/golden/dyn_golden.txt)
